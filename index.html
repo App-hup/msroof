@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;700;800&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
 /* ============ Tokens ============ */
 :root{
@@ -161,6 +162,7 @@ button{font-family:inherit;}
 .field-row>.field{flex:1;}
 .segmented{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
 .segmented button{flex:1;padding:9px 0;background:var(--surface-alt);border:none;color:var(--ink-soft);font-weight:700;cursor:pointer;font-size:13.5px;}
+.segmented button.active{background:var(--emerald-soft);color:var(--emerald);}
 .segmented button.active.inc{background:var(--emerald-soft);color:var(--good);}
 .segmented button.active.exp{background:var(--bad-soft);color:var(--bad);}
 .checkline{display:flex;align-items:center;gap:8px;font-size:13.5px;color:var(--ink-soft);font-weight:600;margin-bottom:10px;}
@@ -268,6 +270,12 @@ button{font-family:inherit;}
 }
 @keyframes spin{to{transform:rotate(360deg);}}
 
+/* ============ Auth gate ============ */
+#authGate{position:fixed;inset:0;z-index:250;background:var(--bg);display:none;align-items:center;justify-content:center;padding:18px;}
+#authGate.active{display:flex;}
+#authGate .modal{box-shadow:0 18px 40px var(--shadow);}
+.auth-link-btn{background:none;border:none;color:var(--brass-deep);font-weight:700;font-size:13px;cursor:pointer;padding:0;text-decoration:underline;}
+
 /* ============ Insight banner ============ */
 .insight{
   display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-radius:9px;
@@ -302,6 +310,25 @@ footer.app-foot{text-align:center;color:var(--ink-faint);font-size:11.5px;margin
 <body>
 
 <div id="loadingOverlay"><div class="spin-seal"></div><div class="muted">جارٍ تحميل دفتر الميزانية…</div></div>
+
+<div id="authGate">
+  <div class="modal">
+    <div style="text-align:center;margin-bottom:18px;">
+      <div class="brand-mark" style="margin:0 auto 10px;">⊙</div>
+      <h2 style="margin:0;">دفتر الميزانية</h2>
+      <p class="muted">سجّل الدخول للمزامنة السحابية عبر Supabase</p>
+    </div>
+    <div class="segmented" id="authModeSeg" style="margin-bottom:16px;">
+      <button type="button" class="active" data-mode="login">تسجيل الدخول</button>
+      <button type="button" data-mode="signup">إنشاء حساب</button>
+    </div>
+    <div class="field"><label>البريد الإلكتروني</label><input type="email" id="authEmail" placeholder="example@email.com"></div>
+    <div class="field"><label>كلمة المرور</label><input type="password" id="authPassword" placeholder="••••••••"></div>
+    <p class="muted" id="authMessage" style="min-height:18px;"></p>
+    <button class="btn btn-emerald btn-block" id="authSubmitBtn">تسجيل الدخول</button>
+    <button class="btn btn-outline btn-block" id="authLocalModeBtn" style="margin-top:9px;">المتابعة بدون حساب (تخزين محلي في هذا المتصفح فقط)</button>
+  </div>
+</div>
 
 <div class="app" id="app" style="display:none;">
 
@@ -522,6 +549,11 @@ footer.app-foot{text-align:center;color:var(--ink-faint);font-size:11.5px;margin
   <section class="view" id="view-settings">
     <p class="eyebrow">التخصيص</p>
     <h2 style="margin:0 0 16px;font-size:21px;">الإعدادات</h2>
+
+    <div class="card" style="margin-bottom:16px;">
+      <h3>التخزين السحابي <span class="muted" style="font-size:11px;font-weight:500;">Supabase</span></h3>
+      <div id="cloudStatusView"></div>
+    </div>
 
     <div class="grid grid-2">
       <div class="card">
@@ -891,8 +923,69 @@ function budgetStatus(b){
   return {spent,pct:clamp(pct,0,999),status};
 }
 
-/* ---------- storage ---------- */
+/* ---------- cloud (Supabase) ---------- */
+let supabaseClient=null;
+let supabaseUser=null;
+let cloudEnabled=false;
+let localOnlyOverride=false;
+
+function getSbConfig(){
+  try{ const raw=localStorage.getItem('sb_config'); return raw?JSON.parse(raw):null; }catch(e){ return null; }
+}
+function setSbConfig(url,key){ localStorage.setItem('sb_config',JSON.stringify({url,key})); }
+function clearSbConfig(){ localStorage.removeItem('sb_config'); }
+
+async function tryInitSupabase(){
+  const cfg=getSbConfig();
+  if(!cfg || !cfg.url || !cfg.key) return false;
+  try{
+    supabaseClient=window.supabase.createClient(cfg.url,cfg.key);
+    const {data}=await supabaseClient.auth.getSession();
+    if(data && data.session && data.session.user){
+      supabaseUser=data.session.user;
+      cloudEnabled=true;
+    }
+    return true;
+  }catch(e){
+    supabaseClient=null;
+    return false;
+  }
+}
+async function cloudGet(key){
+  const {data,error}=await supabaseClient.from('budget_data').select('value').eq('user_id',supabaseUser.id).eq('key',key).maybeSingle();
+  if(error) throw error;
+  if(!data) throw new Error('not found: '+key);
+  return data.value;
+}
+async function cloudSet(key,value){
+  const {error}=await supabaseClient.from('budget_data').upsert(
+    {user_id:supabaseUser.id,key,value,updated_at:new Date().toISOString()},
+    {onConflict:'user_id,key'}
+  );
+  if(error) throw error;
+}
+function translateAuthError(msg){
+  const map={
+    'Invalid login credentials':'بيانات الدخول غير صحيحة.',
+    'User already registered':'هذا البريد مسجَّل مسبقاً — جرّب تسجيل الدخول.',
+    'Password should be at least 6 characters.':'يجب أن تكون كلمة المرور 6 أحرف على الأقل.',
+    'Email not confirmed':'يرجى تأكيد بريدك الإلكتروني أولاً من الرسالة المرسلة إليك، ثم سجّل الدخول.'
+  };
+  return map[msg]||msg;
+}
+
+/* ---------- storage (cloud-first, local fallback) ---------- */
 async function loadKey(key,fallback){
+  if(cloudEnabled && supabaseUser && !localOnlyOverride){
+    try{ return await cloudGet(key); }catch(e){ return fallback; }
+  }
+  try{
+    const res=await window.storage.get(key,false);
+    if(res && res.value) return JSON.parse(res.value);
+    return fallback;
+  }catch(e){ return fallback; }
+}
+async function loadLocalRaw(key,fallback){
   try{
     const res=await window.storage.get(key,false);
     if(res && res.value) return JSON.parse(res.value);
@@ -901,7 +994,13 @@ async function loadKey(key,fallback){
 }
 async function persist(name){
   const map={settings:'settings',categories:'categories',transactions:'transactions',budgets:'budgets',goals:'goals',salaryPlan:'salary_plan',recurring:'recurring'};
-  try{ await window.storage.set(map[name],JSON.stringify(DB[name]),false); }
+  const key=map[name];
+  if(cloudEnabled && supabaseUser && !localOnlyOverride){
+    try{ await cloudSet(key,DB[name]); }
+    catch(e){ showToast('تعذر الحفظ في السحابة — تحقق من اتصالك بالإنترنت','error'); }
+    return;
+  }
+  try{ await window.storage.set(key,JSON.stringify(DB[name]),false); }
   catch(e){ showToast('حدث خطأ أثناء حفظ البيانات','error'); }
 }
 
@@ -1627,6 +1726,7 @@ function renderSettings(){
   sel.value=DB.settings.currency;
   document.getElementById('darkModeCheck').checked=DB.settings.theme==='dark';
   renderCategoryLists();
+  renderCloudPanel();
 }
 document.getElementById('currencySelect').addEventListener('change',e=>{
   DB.settings.currency=e.target.value; persist('settings');
@@ -1743,17 +1843,142 @@ document.getElementById('confirmModalOverlay').addEventListener('click',e=>{
   if(e.target.id==='confirmModalOverlay') document.getElementById('confirmCancelBtn').click();
 });
 
-async function init(){
+/* ===================================================================
+   AUTH GATE (shown only when cloud sync is configured but not logged in)
+   =================================================================== */
+let authMode='login';
+document.getElementById('authModeSeg').addEventListener('click',e=>{
+  const btn=e.target.closest('button'); if(!btn) return;
+  authMode=btn.dataset.mode;
+  document.querySelectorAll('#authModeSeg button').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('authSubmitBtn').textContent=authMode==='login'?'تسجيل الدخول':'إنشاء حساب';
+  document.getElementById('authMessage').textContent='';
+});
+document.getElementById('authSubmitBtn').onclick=async ()=>{
+  const email=document.getElementById('authEmail').value.trim();
+  const password=document.getElementById('authPassword').value;
+  const msgEl=document.getElementById('authMessage');
+  if(!email || !password){ msgEl.style.color='var(--bad)'; msgEl.textContent='أدخل البريد الإلكتروني وكلمة المرور.'; return; }
+  msgEl.style.color='var(--ink-faint)'; msgEl.textContent='جارٍ المعالجة…';
+  try{
+    const result = authMode==='login'
+      ? await supabaseClient.auth.signInWithPassword({email,password})
+      : await supabaseClient.auth.signUp({email,password});
+    if(result.error){ msgEl.style.color='var(--bad)'; msgEl.textContent=translateAuthError(result.error.message); return; }
+    if(result.data.session && result.data.session.user){
+      supabaseUser=result.data.session.user;
+      cloudEnabled=true;
+      msgEl.style.color='var(--good)'; msgEl.textContent='تم تسجيل الدخول…';
+      await handlePostLoginMigration();
+      await startApp();
+    }else{
+      msgEl.style.color='var(--good)';
+      msgEl.textContent='تم إنشاء الحساب! تحقق من بريدك الإلكتروني لتأكيده ثم سجّل الدخول.';
+    }
+  }catch(e){
+    msgEl.style.color='var(--bad)';
+    msgEl.textContent='تعذّر الاتصال. تحقق من رابط ومفتاح Supabase في الإعدادات وصحة اتصالك بالإنترنت.';
+  }
+};
+document.getElementById('authLocalModeBtn').onclick=()=>{
+  localOnlyOverride=true;
+  startApp();
+};
+
+async function handlePostLoginMigration(){
+  if(localStorage.getItem('sb_just_connected')!=='1') return;
+  localStorage.removeItem('sb_just_connected');
+  const local={
+    transactions: await loadLocalRaw('transactions',[]),
+    budgets: await loadLocalRaw('budgets',[]),
+    goals: await loadLocalRaw('goals',[]),
+    salary_plan: await loadLocalRaw('salary_plan',null),
+    categories: await loadLocalRaw('categories',null),
+    settings: await loadLocalRaw('settings',null),
+    recurring: await loadLocalRaw('recurring',[])
+  };
+  const hasLocal = local.transactions.length>0 || local.budgets.length>0 || local.goals.length>0 || (local.salary_plan && Number(local.salary_plan.salary)>0);
+  if(!hasLocal) return;
+  await new Promise(resolve=>{
+    confirmAction('عُثر على بيانات محفوظة محلياً على هذا المتصفح. هل تريد رفعها إلى حسابك السحابي الجديد؟',async ()=>{
+      for(const [k,v] of Object.entries(local)){
+        if(v!==null){ try{ await cloudSet(k,v); }catch(e){ /* ignore single-key failure */ } }
+      }
+      showToast('تم رفع بياناتك المحلية إلى السحابة','success');
+      resolve();
+    },'ترحيل البيانات المحلية',()=>resolve());
+  });
+}
+
+/* ---------- Settings: cloud sync panel ---------- */
+function renderCloudPanel(){
+  const el=document.getElementById('cloudStatusView');
+  const cfg=getSbConfig();
+  if(!cfg){
+    el.innerHTML=`
+      <p class="muted" style="margin-top:0;">فعّل المزامنة السحابية لحفظ بياناتك في حساب Supabase والوصول إليها من أي جهاز.</p>
+      <div class="field"><label>رابط المشروع (Project URL)</label><input type="text" id="sbUrlInput" placeholder="https://xxxx.supabase.co"></div>
+      <div class="field"><label>المفتاح العام (anon public key)</label><input type="text" id="sbKeyInput" placeholder="eyJhbGciOi..."></div>
+      <button class="btn btn-emerald btn-block" onclick="sbConnect()">تفعيل المزامنة السحابية</button>`;
+  }else if(cloudEnabled && supabaseUser && !localOnlyOverride){
+    el.innerHTML=`
+      <p style="margin-top:0;">متصل بحساب: <b class="num">${supabaseUser.email}</b></p>
+      <p class="muted">بياناتك تُحفظ تلقائياً في السحابة وتتزامن مع أي جهاز تسجّل الدخول منه بهذا الحساب.</p>
+      <button class="btn btn-outline btn-block" onclick="sbLogout()" style="margin-top:8px;">تسجيل الخروج</button>
+      <button class="btn btn-danger btn-block" onclick="sbDisconnect()" style="margin-top:9px;">إلغاء الربط بالكامل (رجوع للتخزين المحلي)</button>`;
+  }else{
+    el.innerHTML=`
+      <p class="muted" style="margin-top:0;">المزامنة السحابية مُهيّأة، لكنك تتابع حالياً في وضع التخزين المحلي لهذه الجلسة.</p>
+      <button class="btn btn-emerald btn-block" onclick="location.reload()">إعادة تحميل لتسجيل الدخول</button>
+      <button class="btn btn-danger btn-block" onclick="sbDisconnect()" style="margin-top:9px;">إلغاء الربط بالكامل</button>`;
+  }
+}
+function sbConnect(){
+  const url=document.getElementById('sbUrlInput').value.trim();
+  const key=document.getElementById('sbKeyInput').value.trim();
+  if(!url || !key){ showToast('أدخل الرابط والمفتاح','error'); return; }
+  setSbConfig(url,key);
+  localStorage.setItem('sb_just_connected','1');
+  showToast('تم الحفظ، يُعاد تحميل الصفحة…','success');
+  setTimeout(()=>location.reload(),700);
+}
+async function sbLogout(){
+  if(supabaseClient) await supabaseClient.auth.signOut();
+  location.reload();
+}
+function sbDisconnect(){
+  confirmAction('سيتم قطع الاتصال بالسحابة والرجوع إلى التخزين المحلي لهذا المتصفح. بياناتك المحفوظة في حساب Supabase تبقى كما هي.',async ()=>{
+    if(supabaseClient) await supabaseClient.auth.signOut();
+    clearSbConfig();
+    location.reload();
+  },'إلغاء الربط السحابي');
+}
+
+/* ===================================================================
+   BOOT
+   =================================================================== */
+async function startApp(){
   await loadAll();
   processRecurring();
   document.documentElement.setAttribute('data-theme',DB.settings.theme==='dark'?'dark':'light');
   document.getElementById('themeToggle').textContent=DB.settings.theme==='dark'?'☀':'🌙';
   updateTodayLabel();
   document.getElementById('loadingOverlay').style.display='none';
+  document.getElementById('authGate').classList.remove('active');
   document.getElementById('app').style.display='block';
   switchView('dashboard');
 }
-init();
+async function boot(){
+  const configured=await tryInitSupabase();
+  if(configured && !cloudEnabled){
+    document.getElementById('loadingOverlay').style.display='none';
+    document.getElementById('authGate').classList.add('active');
+    return;
+  }
+  await startApp();
+}
+boot();
 </script>
 </body>
 </html>
